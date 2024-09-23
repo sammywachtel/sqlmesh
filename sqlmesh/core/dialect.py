@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+import logging
 import re
 import sys
 import typing as t
@@ -32,6 +33,8 @@ if t.TYPE_CHECKING:
 SQLMESH_MACRO_PREFIX = "@"
 
 TABLES_META = "sqlmesh.tables"
+
+logger = logging.getLogger(__name__)
 
 
 class Model(exp.Expression):
@@ -314,6 +317,15 @@ def _parse_join(
     return macro
 
 
+def _warn_unsupported(self: Parser) -> None:
+    sql = self._find_sql(self._tokens[0], self._tokens[-1])[: self.error_message_context]
+
+    logger.warning(
+        f"'{sql}' could not be semantically understood as it contains unsupported syntax, SQLMesh will treat the command as is. Note that any references to the model's "
+        "underlying physical table can't be resolved in this case, consider using Jinja as explained here https://sqlmesh.readthedocs.io/en/stable/concepts/macros/macro_variables/#audit-only-variables"
+    )
+
+
 def _parse_select(
     self: Parser,
     nested: bool = False,
@@ -579,7 +591,12 @@ def _props_sql(self: Generator, expressions: t.List[exp.Expression]) -> str:
     size = len(expressions)
 
     for i, prop in enumerate(expressions):
-        sql = self.indent(f"{prop.name} {self.sql(prop, 'value')}")
+        value = prop.args.get("value")
+        if prop.name == "when_matched" and isinstance(value, list):
+            output_value = ", ".join(self.sql(v) for v in value)
+        else:
+            output_value = self.sql(prop, "value")
+        sql = self.indent(f"{prop.name} {output_value}")
 
         if i < size - 1:
             sql += ","
@@ -886,6 +903,7 @@ def extend_sqlglot() -> None:
     _override(Parser, _parse_types)
     _override(Parser, _parse_if)
     _override(Parser, _parse_id_var)
+    _override(Parser, _warn_unsupported)
     _override(Snowflake.Parser, _parse_table_parts)
 
 

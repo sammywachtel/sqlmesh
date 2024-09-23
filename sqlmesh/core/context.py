@@ -45,7 +45,7 @@ from functools import cached_property
 from io import StringIO
 from pathlib import Path
 from shutil import rmtree
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 
 import pandas as pd
 from sqlglot import Dialect, exp
@@ -54,7 +54,7 @@ from sqlglot.lineage import GraphHTML
 from sqlmesh.core import analytics
 from sqlmesh.core import constants as c
 from sqlmesh.core.analytics import python_api_analytics
-from sqlmesh.core.audit import Audit, StandaloneAudit
+from sqlmesh.core.audit import Audit, ModelAudit, StandaloneAudit
 from sqlmesh.core.config import CategorizerConfig, Config, load_configs
 from sqlmesh.core.config.loader import C
 from sqlmesh.core.console import Console, get_console
@@ -317,9 +317,10 @@ class GenericContext(BaseContext, t.Generic[C]):
         self.configs = (
             config if isinstance(config, dict) else load_configs(config, self.CONFIG_TYPE, paths)
         )
+        self._loaders: UniqueKeyDict[str, SimpleNamespace] = UniqueKeyDict("loaders")
         self.dag: DAG[str] = DAG()
         self._models: UniqueKeyDict[str, Model] = UniqueKeyDict("models")
-        self._audits: UniqueKeyDict[str, Audit] = UniqueKeyDict("audits")
+        self._audits: UniqueKeyDict[str, ModelAudit] = UniqueKeyDict("audits")
         self._standalone_audits: UniqueKeyDict[str, StandaloneAudit] = UniqueKeyDict(
             "standaloneaudits"
         )
@@ -330,7 +331,15 @@ class GenericContext(BaseContext, t.Generic[C]):
         self._loaded: bool = False
 
         self.path, self.config = t.cast(t.Tuple[Path, C], next(iter(self.configs.items())))
+        for path, config in self.configs.items():
+            project_type = c.DBT if config.loader.__name__.lower().startswith(c.DBT) else c.NATIVE
+            if project_type not in self._loaders:
+                self._loaders[project_type] = SimpleNamespace(
+                    loader=(loader or config.loader)(**config.loader_kwargs), configs={}
+                )
+            self._loaders[project_type].configs[path] = config
 
+        self.project_type = c.HYBRID if len(self._loaders) > 1 else project_type
         self._all_dialects: t.Set[str] = {self.config.dialect or ""}
 
         # This allows overriding the default dialect's normalization strategy, so for example
@@ -363,8 +372,6 @@ class GenericContext(BaseContext, t.Generic[C]):
 
         self._provided_state_sync: t.Optional[StateSync] = state_sync
         self._state_sync: t.Optional[StateSync] = None
-
-        self._loader = (loader or self.config.loader)(**self.config.loader_kwargs)
 
         # Should we dedupe notification_targets? If so how?
         self.notification_targets = (notification_targets or []) + self.config.notification_targets
@@ -517,41 +524,49 @@ class GenericContext(BaseContext, t.Generic[C]):
 
     def refresh(self) -> None:
         """Refresh all models that have been updated."""
-        if self._loader.reload_needed():
+        if any(context_loader.loader.reload_needed() for context_loader in self._loaders.values()):
             self.load()
 
     def load(self, update_schemas: bool = True) -> GenericContext[C]:
         """Load all files in the context's path."""
         load_start_ts = time.perf_counter()
-        with sys_path(*self.configs):
-            project = self._loader.load(self, update_schemas)
-            self._macros = project.macros
-            self._jinja_macros = project.jinja_macros
-            self._models = project.models
-            self._metrics = project.metrics
-            self._standalone_audits.clear()
-            self._audits.clear()
+
+        projects = []
+        for context_loader in self._loaders.values():
+            with sys_path(*context_loader.configs):
+                projects.append(context_loader.loader.load(self, update_schemas))
+
+        self._standalone_audits.clear()
+        self._audits.clear()
+        self._macros.clear()
+        self._models.clear()
+        self._metrics.clear()
+        for project in projects:
+            self._jinja_macros = self._jinja_macros.merge(project.jinja_macros)
+            self._macros.update(project.macros)
+            self._models.update(project.models)
+            self._metrics.update(project.metrics)
+
             for name, audit in project.audits.items():
                 if isinstance(audit, StandaloneAudit):
                     self._standalone_audits[name] = audit
                 else:
                     self._audits[name] = audit
-            self.dag = project.dag
 
-            duplicates = set(self._models) & set(self._standalone_audits)
-            if duplicates:
-                raise ConfigError(
-                    f"Models and Standalone audits cannot have the same name: {duplicates}"
-                )
+        self.dag = DAG({k: v for project in projects for k, v in project.dag.graph.items()})
 
-            self._all_dialects = {m.dialect for m in self._models.values() if m.dialect} | {
-                self.default_dialect or ""
-            }
+        duplicates = set(self._models) & set(self._standalone_audits)
+        if duplicates:
+            raise ConfigError(
+                f"Models and Standalone audits cannot have the same name: {duplicates}"
+            )
+
+        self._all_dialects = {m.dialect for m in self._models.values() if m.dialect} | {
+            self.default_dialect or ""
+        }
 
         analytics.collector.on_project_loaded(
-            project_type=(
-                c.DBT if type(self._loader).__name__.lower().startswith(c.DBT) else c.NATIVE
-            ),
+            project_type=self.project_type,
             models_count=len(self._models),
             audits_count=len(self._audits),
             standalone_audits_count=len(self._standalone_audits),
@@ -601,8 +616,9 @@ class GenericContext(BaseContext, t.Generic[C]):
 
         if not self._loaded:
             # Signals should be loaded to run correctly.
-            with sys_path(*self.configs):
-                self._loader.load_signals(self)
+            for context_loader in self._loaders.values():
+                with sys_path(*context_loader.configs):
+                    context_loader.loader.load_signals(self)
 
         success = False
         try:
@@ -743,7 +759,7 @@ class GenericContext(BaseContext, t.Generic[C]):
                 pass
         return self.config
 
-    def config_for_node(self, node: str | Model | StandaloneAudit) -> Config:
+    def config_for_node(self, node: str | Model | Audit) -> Config:
         if isinstance(node, str):
             return self.config_for_path(self.get_snapshot(node, raise_if_missing=True).node._path)  # type: ignore
         return self.config_for_path(node._path)  # type: ignore
@@ -829,12 +845,16 @@ class GenericContext(BaseContext, t.Generic[C]):
             )
             return next(pandas_to_sql(t.cast(pd.DataFrame, df), model.columns_to_types))
 
+        snapshots = self.snapshots
+        deployability_index = DeployabilityIndex.create(snapshots.values())
+
         return model.render_query_or_raise(
             start=start,
             end=end,
             execution_time=execution_time,
-            snapshots=self.snapshots,
+            snapshots=snapshots,
             expand=expand,
+            deployability_index=deployability_index,
             engine_adapter=self.engine_adapter,
             **kwargs,
         )
@@ -888,7 +908,7 @@ class GenericContext(BaseContext, t.Generic[C]):
         """Format all SQL models and audits."""
         format_targets = {**self._models, **self._audits}
         for target in format_targets.values():
-            if not target._path.suffix == ".sql":
+            if target._path is None or target._path.suffix != ".sql":
                 continue
             with open(target._path, "r+", encoding="utf-8") as file:
                 before = file.read()

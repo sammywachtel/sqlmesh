@@ -1332,8 +1332,6 @@ def test_merge(ctx: TestContext):
 
 
 def test_scd_type_2_by_time(ctx: TestContext):
-    if ctx.dialect == "clickhouse":
-        pytest.skip("SCD models not yet supported for Clickhouse.")
     time_type = exp.DataType.build("timestamp")
 
     ctx.columns_to_types = {
@@ -1477,8 +1475,6 @@ def test_scd_type_2_by_time(ctx: TestContext):
 
 
 def test_scd_type_2_by_column(ctx: TestContext):
-    if ctx.dialect == "clickhouse":
-        pytest.skip("SCD models not yet supported for Clickhouse.")
     time_type = exp.DataType.build("timestamp")
 
     ctx.columns_to_types = {
@@ -2319,7 +2315,7 @@ def test_to_time_column(
         #   specific data type to validate what is returned.
         import re
 
-        time_column = re.match("^(.*?)\+", time_column).group(1)
+        time_column = re.match(r"^(.*?)\+", time_column).group(1)
         time_column_type = exp.DataType.build("TIMESTAMP('UTC')", dialect="clickhouse")
 
     time_column = to_time_column(time_column, time_column_type, time_column_format)

@@ -3916,7 +3916,7 @@ def test_when_matched_multiple():
     expressions = d.parse(
         """
         MODEL (
-          name db.employees,
+          name @{schema}.employees,
           kind INCREMENTAL_BY_UNIQUE_KEY (
             unique_key name,
             when_matched WHEN MATCHED AND source.x = 1 THEN UPDATE SET target.salary = COALESCE(source.salary, target.salary),
@@ -3933,7 +3933,7 @@ def test_when_matched_multiple():
         "WHEN MATCHED THEN UPDATE SET __MERGE_TARGET__.salary = COALESCE(__MERGE_SOURCE__.salary, __MERGE_TARGET__.salary)",
     ]
 
-    model = load_sql_based_model(expressions, dialect="hive")
+    model = load_sql_based_model(expressions, dialect="hive", variables={"schema": "db"})
     assert len(model.kind.when_matched) == 2
     assert model.kind.when_matched[0].sql() == expected_when_matched[0]
     assert model.kind.when_matched[1].sql() == expected_when_matched[1]
@@ -5856,6 +5856,42 @@ def test_trailing_comments():
     model = load_sql_based_model(expressions, path=Path("./examples/sushi/models/test_model.sql"))
     assert not model.render_pre_statements()
     assert not model.render_post_statements()
+
+
+def test_comments_in_jinja_query():
+    expressions = d.parse(
+        """
+        MODEL (name db.table);
+
+        JINJA_QUERY_BEGIN;
+        /* some comment A */
+
+        SELECT 1;
+        /* some comment B */
+
+        JINJA_END;
+        """
+    )
+    model = load_sql_based_model(expressions)
+    assert model.render_query().sql() == '/* some comment A */ SELECT 1 AS "1"'
+
+    expressions = d.parse(
+        """
+        MODEL (name db.table);
+
+        JINJA_QUERY_BEGIN;
+        /* some comment A */
+
+        SELECT 1;
+        SELECT 2;
+        /* some comment B */
+
+        JINJA_END;
+        """
+    )
+    model = load_sql_based_model(expressions)
+    with pytest.raises(ConfigError, match=r"Too many statements in query.*"):
+        model.render_query()
 
 
 def test_staged_file_path():

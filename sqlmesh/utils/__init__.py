@@ -65,7 +65,7 @@ def random_id(short: bool = False) -> str:
     return uuid.uuid4().hex
 
 
-class UniqueKeyDict(dict, t.Mapping[KEY, VALUE]):
+class UniqueKeyDict(t.Dict[KEY, VALUE]):
     """Dict that raises when a duplicate key is set."""
 
     def __init__(self, name: str, *args: t.Dict[KEY, VALUE], **kwargs: VALUE) -> None:
@@ -81,7 +81,10 @@ class UniqueKeyDict(dict, t.Mapping[KEY, VALUE]):
 
 
 class AttributeDict(dict, t.Mapping[KEY, VALUE]):
-    __getattr__ = dict.get
+    def __getattr__(self, key: t.Any) -> t.Optional[VALUE]:
+        if key.startswith("__") and not hasattr(self, key):
+            raise AttributeError
+        return self.get(key)
 
     def set(self, field: str, value: t.Any) -> str:
         self[field] = value
