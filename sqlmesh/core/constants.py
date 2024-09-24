@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import sys
 import typing as t
 from pathlib import Path
 
@@ -97,11 +98,13 @@ def is_daemon_process() -> bool:
         try:
             return not os.isatty(sys.stdout.fileno())
         except OSError:
+            print(f"DEBUGGING: exception occurred when calling os.isatty(): {sys.exc_info()[0]}")
             # If we can't determine fileno, assume daemon (could be logging proxy or similar)
             return True
 
-    # Non-daemon, likely running in a non-interactive, piped, or background job environment
-    return False
+    # Does not have daemon IDs, but appears to be running in a non-interactive, piped, or background job environment
+    #   For safety, assume daemon
+    return True
 
 
 if hasattr(os, "fork") and not is_daemon_process():
